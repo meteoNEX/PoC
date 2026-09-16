@@ -1,0 +1,60 @@
+services:
+  python-direct:
+    build: ./backend-python-direct
+    environment:
+      SENTRY_DSN_PYTHON_DIRECT: ${SENTRY_DSN_PYTHON_DIRECT}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-poc}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-sentry-poc@1.0.0}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-1.0}
+    ports:
+      - "8001:8001"
+
+  python-downstream:
+    build: ./backend-python-downstream
+    environment:
+      SENTRY_DSN_PYTHON_DOWNSTREAM: ${SENTRY_DSN_PYTHON_DOWNSTREAM}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-poc}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-sentry-poc@1.0.0}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-1.0}
+    ports:
+      - "8002:8002"
+
+  spring:
+    build: ./backend-spring
+    environment:
+      SENTRY_DSN_SPRING: ${SENTRY_DSN_SPRING}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-poc}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-sentry-poc@1.0.0}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-1.0}
+      SENTRY_POC_DOWNSTREAM_BASE_URL: http://python-downstream:8002
+      SPRING_PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      - python-downstream
+
+  web-next:
+    build:
+      context: ./web-next
+      args:
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-poc}
+        NEXT_PUBLIC_SENTRY_RELEASE: ${NEXT_PUBLIC_SENTRY_RELEASE:-sentry-poc@1.0.0}
+        NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE: ${NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE:-1.0}
+        SENTRY_ORG: ${SENTRY_ORG:-}
+        SENTRY_PROJECT: ${SENTRY_PROJECT:-sentry-poc-next}
+        SENTRY_AUTH_TOKEN: ${SENTRY_AUTH_TOKEN:-}
+    environment:
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-poc}
+      NEXT_PUBLIC_SENTRY_RELEASE: ${NEXT_PUBLIC_SENTRY_RELEASE:-sentry-poc@1.0.0}
+      PYTHON_DIRECT_BASE_URL: http://python-direct:8001
+      SPRING_BASE_URL: http://spring:8080
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-poc}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-sentry-poc@1.0.0}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-1.0}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - python-direct
+      - spring
