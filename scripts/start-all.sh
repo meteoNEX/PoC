@@ -27,8 +27,8 @@ echo "Using SENTRY_RELEASE=${SENTRY_RELEASE}"
 chmod +x "$ROOT/scripts/"*.sh "$ROOT/scripts/"*.py 2>/dev/null || true
 
 mkdir -p "$ROOT/logs" "$ROOT/.pids"
-# Write Next.js env without copying unknown extra secrets beyond the PoC .env.
-cp "$ROOT/.env" "$ROOT/web-next/.env.local"
+# Rewrite Next.js env so empty/placeholder SENTRY_RELEASE lines cannot win over the git SHA.
+grep -vE '^(SENTRY_RELEASE|NEXT_PUBLIC_SENTRY_RELEASE)=' "$ROOT/.env" > "$ROOT/web-next/.env.local"
 {
   echo "SENTRY_RELEASE=${SENTRY_RELEASE}"
   echo "NEXT_PUBLIC_SENTRY_RELEASE=${NEXT_PUBLIC_SENTRY_RELEASE}"
@@ -70,7 +70,10 @@ nohup mvn -f "$ROOT/backend-spring/pom.xml" spring-boot:run \
 echo $! > "$ROOT/.pids/spring.pid"
 
 echo "Starting Next.js on :${NEXT_PORT:-3000}"
-nohup npm --prefix "$ROOT/web-next" run dev -- --port "${NEXT_PORT:-3000}" \
+nohup env \
+  SENTRY_RELEASE="${SENTRY_RELEASE}" \
+  NEXT_PUBLIC_SENTRY_RELEASE="${NEXT_PUBLIC_SENTRY_RELEASE}" \
+  npm --prefix "$ROOT/web-next" run dev -- --port "${NEXT_PORT:-3000}" \
   > "$ROOT/logs/next.log" 2>&1 &
 echo $! > "$ROOT/.pids/next.pid"
 

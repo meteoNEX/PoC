@@ -118,6 +118,8 @@ Create the token in Sentry:
 
 The Next.js production build still succeeds without this token. Source maps simply are not uploaded.
 
+If `SENTRY_AUTH_TOKEN` **is** set but invalid, `next build` **fails** (401). That is intentional so a bad token cannot be mistaken for a successful upload.
+
 ### Sampling (read this)
 
 `SENTRY_TRACES_SAMPLE_RATE=1.0` exists in `.env.example` **and** as a code fallback (`"1"` / `"1.0"`) in Next.js, Python, and Spring. It is isolated for PoC reliability. **Production must not copy this.** Use a low rate or a `tracesSampler`.
@@ -425,7 +427,9 @@ Later:
 
 ## 18. Known limitations
 
-- **Source maps:** build-plugin upload can be confirmed from logs. Original-source stack traces in the Issue UI **Require Sentry SaaS verification**.
+- **Source maps:** a valid `SENTRY_AUTH_TOKEN` is required for upload. An invalid token fails `next build` with HTTP 401 rather than silently succeeding. Original-source stack traces in the Issue UI **Require Sentry SaaS verification**.
+- **Browser envelope transport:** `tunnelRoute` is **not** enabled. A `/sentry-tunnel` POST returned HTTP 403 on Next.js 16 in this environment and would have dropped browser envelopes. The browser SDK sends directly to the ingest DSN.
+- **Sentry ingest from some networks:** envelope POSTs to `ingest.us.sentry.io` may return HTTP 403 (project security, WAF, or network policy). Local proof that an error was **thrown** is not the same as proof it was **accepted** by Sentry. Check the Issue UI.
 - **Uptime monitor, email alerts, and Sentry MCP** need user-side configuration. The repo only provides application hooks.
 - **Session Replay and Profiling are disabled** on purpose.
 - **Native fetch vs `getTraceData()`:** these are different APIs. Default `getTraceData()` omitting `traceparent` does not mean native fetch omitted it. See section 9. There is **no** pre-fetch tracing-header workaround on the two core hops.
