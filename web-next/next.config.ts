@@ -43,7 +43,7 @@ const nextConfig: NextConfig = {
 
 export default withSentryConfig(nextConfig, {
   org: process.env.SENTRY_ORG || undefined,
-  project: process.env.SENTRY_PROJECT || "sentry-poc-next",
+  project: process.env.SENTRY_PROJECT || "sentry-poc-next-2",
   authToken: process.env.SENTRY_AUTH_TOKEN,
   release: {
     name: releaseName,

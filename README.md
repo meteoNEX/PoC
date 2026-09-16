@@ -26,7 +26,7 @@ Session Replay and Profiling are **intentionally not enabled**. This PoC targets
                                       ▼
                          ┌──────────────────────────┐
                          │  Next.js  (web-next)     │
-                         │  sentry-poc-next         │
+                         │  sentry-poc-next-2       │
                          └───┬──────────────────┬───┘
                              │                  │
                              │                  │ native instrumented fetch
@@ -54,8 +54,21 @@ Four Sentry projects:
 
 | Path | Projects involved |
 | --- | --- |
-| Browser → Next.js → Python Direct | `sentry-poc-next`, `sentry-poc-python-direct` (**two** projects) |
-| Browser → Next.js → Spring → Python Downstream | `sentry-poc-next`, `sentry-poc-spring`, `sentry-poc-python-downstream` (**three** projects) |
+| Browser → Next.js → Python Direct | `sentry-poc-next-2`, `sentry-poc-python-direct` (**two** projects) |
+| Browser → Next.js → Spring → Python Downstream | `sentry-poc-next-2`, `sentry-poc-spring`, `sentry-poc-python-downstream` (**three** projects) |
+
+### Next.js project switch (`sentry-poc-next` → `sentry-poc-next-2`)
+
+The original Next.js project **`sentry-poc-next`** (ProjectId `4512097256341504`) is **deprecated**. Production browser envelopes to that project were rejected with HTTP 403 `event submission rejected with_reason: ProjectId`. That was a **Sentry project-side** failure, not an SDK envelope-construction bug. Do not send new Next.js events there.
+
+The current Next.js project is **`sentry-poc-next-2`** (ProjectId `4512097794916352`). It has been verified with:
+
+- a real `@sentry/node` SDK envelope accepted with HTTP **200** and an event id
+- a production browser SDK envelope (Test 1) accepted with HTTP **200** and an event id
+
+Source maps have been **re-uploaded** to `sentry-poc-next-2` during a production `next build` (with `SENTRY_ORG=meteonex` and `SENTRY_PROJECT=sentry-poc-next-2`). Final stack **symbolication still Requires user-side Sentry UI confirmation**.
+
+The Next.js SDK `service` attribute stays `sentry-poc-next`. That is the **service name**, not the Sentry project slug. Spring / Python DSNs were not changed.
 
 The inspectable Next.js outbound hop lives in `web-next/lib/outbound-fetch.ts`. It uses **native `fetch` only**. It does **not** call `Sentry.getTraceData()` and does **not** set `sentry-trace`, `baggage`, or `traceparent` before `fetch()`. The source of truth for what was actually sent is downstream `incoming_trace_headers`.
 
@@ -65,7 +78,7 @@ The inspectable Next.js outbound hop lives in `web-next/lib/outbound-fetch.ts`. 
 
 | Service | Directory | Default URL | Sentry project |
 | --- | --- | --- | --- |
-| Next.js dashboard + BFF | `web-next/` | http://127.0.0.1:3000 | `sentry-poc-next` |
+| Next.js dashboard + BFF | `web-next/` | http://127.0.0.1:3000 | `sentry-poc-next-2` |
 | Spring Boot | `backend-spring/` | http://127.0.0.1:8080 | `sentry-poc-spring` |
 | Python Direct (FastAPI) | `backend-python-direct/` | http://127.0.0.1:8001 | `sentry-poc-python-direct` |
 | Python Downstream (FastAPI) | `backend-python-downstream/` | http://127.0.0.1:8002 | `sentry-poc-python-downstream` |
@@ -90,7 +103,7 @@ Copy `.env.example` to `.env`. DSNs are public ingestion keys for this PoC.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `NEXT_PUBLIC_SENTRY_DSN` | Next.js browser + server | Project `sentry-poc-next` |
+| `NEXT_PUBLIC_SENTRY_DSN` | Next.js browser + server | Project `sentry-poc-next-2` |
 | `SENTRY_DSN_SPRING` | Spring Boot | Project `sentry-poc-spring` |
 | `SENTRY_DSN_PYTHON_DIRECT` | Python Direct | Project `sentry-poc-python-direct` |
 | `SENTRY_DSN_PYTHON_DOWNSTREAM` | Python Downstream | Project `sentry-poc-python-downstream` |
@@ -102,7 +115,7 @@ Copy `.env.example` to `.env`. DSNs are public ingestion keys for this PoC.
 | `SENTRY_POC_DOWNSTREAM_BASE_URL` | Spring | Outbound to Python Downstream |
 | `SENTRY_POC_UPTIME_MODE` | Spring | Optional default for `/api/uptime-test` |
 | `SENTRY_ORG` | Next.js production build | Org slug for source map upload |
-| `SENTRY_PROJECT` | Next.js production build | `sentry-poc-next` |
+| `SENTRY_PROJECT` | Next.js production build | `sentry-poc-next-2` |
 | `SENTRY_AUTH_TOKEN` | Next.js production build | **Secret.** Never commit. |
 
 Do not commit Sentry auth tokens, API tokens, or GitHub tokens.
@@ -203,8 +216,8 @@ npm --prefix web-next run start
 With source-map upload (after creating `SENTRY_AUTH_TOKEN` and `SENTRY_ORG`):
 
 ```bash
-export SENTRY_ORG=<org slug>
-export SENTRY_PROJECT=sentry-poc-next
+export SENTRY_ORG=meteonex
+export SENTRY_PROJECT=sentry-poc-next-2
 export SENTRY_AUTH_TOKEN=...   # shell only, never commit
 export SENTRY_RELEASE="sentry-poc@$(git rev-parse HEAD)"
 export NEXT_PUBLIC_SENTRY_RELEASE="$SENTRY_RELEASE"
@@ -216,7 +229,7 @@ Then **user-side Sentry UI confirmation**:
 
 1. Open the production dashboard.
 2. Run **test 1** (synchronous uncaught browser exception).
-3. In Sentry project `sentry-poc-next`, open the Issue.
+3. In Sentry project `sentry-poc-next-2`, open the Issue.
 4. Confirm the stack shows original `.tsx` / `.ts` files (for example `app/dashboard.tsx`), not only a minified chunk.
 5. Confirm line / column are usable.
 6. Confirm the event `release` matches `sentry-poc@<git SHA>` and `environment=poc`.
@@ -231,11 +244,11 @@ Open the dashboard and click each card. Fill Pass/Fail after inspecting Sentry. 
 
 | Test | Expected Sentry result | How confirmed | Pass/Fail |
 | --- | --- | --- | --- |
-| 1 Synchronous uncaught browser exception | Issue in `sentry-poc-next`, browser runtime | Requires Sentry SaaS verification |  |
+| 1 Synchronous uncaught browser exception | Issue in `sentry-poc-next-2`, browser runtime | Requires Sentry SaaS verification |  |
 | 2 Unhandled Promise rejection | Separate Issue for the rejection | Requires Sentry SaaS verification |  |
 | 3 React render error | Issue from `error.tsx` / `global-error.tsx` | Requires Sentry SaaS verification |  |
 | 4 Error boundary | Issue from explicit `captureException` | Requires Sentry SaaS verification |  |
-| 5 Browser warning log | Log in `sentry-poc-next` Logs (`log_channel=sentry.logger`) | Requires Sentry SaaS verification |  |
+| 5 Browser warning log | Log in `sentry-poc-next-2` Logs (`log_channel=sentry.logger`) | Requires Sentry SaaS verification |  |
 | 6 Next.js uncaught server exception | Issue via `onRequestError` | Local runtime status 500 + SaaS Issue |  |
 | 7 Next.js caught + captureException | Issue from explicit capture; HTTP 200 | Local runtime + SaaS Issue |  |
 | 8 Next.js server log | Log with `log_channel=sentry.logger` | Local runtime + SaaS Logs |  |
@@ -260,11 +273,11 @@ Open the dashboard and click each card. Fill Pass/Fail after inspecting Sentry. 
 
 Use **Issues**, **Explore → Traces**, **Logs**, and **Metrics**. Filter `environment:poc` and the current `release` (`sentry-poc@<git SHA>`).
 
-- **Browser errors (1–4):** Issues in `sentry-poc-next`. Test 1 is a **synchronous** click-handler throw. Test 2 is a **Promise rejection**. They must not be the same mechanism.
+- **Browser errors (1–4):** Issues in `sentry-poc-next-2`. Test 1 is a **synchronous** click-handler throw. Test 2 is a **Promise rejection**. They must not be the same mechanism.
 - **Browser log (5):** Logs product via `Sentry.logger`, not `console.warn`.
 - **Server errors (6–7):** Node runtime, route `/api/server/*`.
 - **Server log (8):** Explicit `Sentry.logger` with attributes `service`, `test_case`, `request_kind`, `log_channel`.
-- **Trace 9:** **Two** projects (`sentry-poc-next` + `sentry-poc-python-direct`). Expected abstract tree:
+- **Trace 9:** **Two** projects (`sentry-poc-next-2` + `sentry-poc-python-direct`). Expected abstract tree:
   - Browser transaction / browser span
   - → Next.js server span
   - → Next.js HTTP client span (`http.client`)
@@ -287,8 +300,8 @@ Use **Issues**, **Explore → Traces**, **Logs**, and **Metrics**. Filter `envir
 2. Copy identifiers from the dashboard payload: `active_span.trace_id`, `active_span.span_id`, `active_span.parent_span_id`, `span_hierarchy_local_evidence`.
 3. In Sentry, open **Explore → Traces** (or an Issue → Trace) and paste the trace id.
 4. A passing result shows **one trace id** with a **correct parent-child tree**, not merely the same id on sibling spans:
-   - Test 9: `sentry-poc-next` + `sentry-poc-python-direct`
-   - Test 11: `sentry-poc-next` + `sentry-poc-spring` + `sentry-poc-python-downstream`
+   - Test 9: `sentry-poc-next-2` + `sentry-poc-python-direct`
+   - Test 11: `sentry-poc-next-2` + `sentry-poc-spring` + `sentry-poc-python-downstream`
 5. Local evidence in the JSON:
    - `headers_injected_by_next_before_fetch` must be `false`
    - `incoming_trace_headers['sentry-trace']` span id must equal downstream `active_span.parent_span_id`
@@ -410,7 +423,7 @@ Not configured here (no alert rules are created by this repo). **Requires user-s
 
 Later, in Sentry:
 
-1. **Settings → Projects → sentry-poc-next (or spring) → Alerts**
+1. **Settings → Projects → sentry-poc-next-2 (or spring) → Alerts**
 2. Create an issue alert: environment `poc`, action Email.
 3. Trigger test 1 or 13.
 4. Confirm the mail arrives and links to the Issue / Trace.
@@ -422,14 +435,15 @@ Not configured here (no OAuth client is created by this repo). **Requires user-s
 Later:
 
 1. Enable the Sentry MCP server against this org.
-2. Ask it for recent issues in `sentry-poc-next` after clicking dashboard tests.
+2. Ask it for recent issues in `sentry-poc-next-2` after clicking dashboard tests.
 3. Confirm it can resolve the same trace id you copied from the dashboard.
 
 ## 18. Known limitations
 
 - **Source maps:** a valid `SENTRY_AUTH_TOKEN` is required for upload. An invalid token fails `next build` with HTTP 401 rather than silently succeeding. Original-source stack traces in the Issue UI **Require Sentry SaaS verification**.
 - **Browser envelope transport:** `tunnelRoute` is **not** enabled. A `/sentry-tunnel` POST returned HTTP 403 on Next.js 16 in this environment and would have dropped browser envelopes. The browser SDK sends directly to the ingest DSN.
-- **Sentry ingest from some networks:** envelope POSTs to `ingest.us.sentry.io` may return HTTP 403 (project security, WAF, or network policy). Local proof that an error was **thrown** is not the same as proof it was **accepted** by Sentry. Check the Issue UI.
+- **Deprecated Next.js project `sentry-poc-next`:** ingest returned HTTP 403 `event submission rejected with_reason: ProjectId`. Use **`sentry-poc-next-2`** instead. That replacement project accepted real SDK and production browser envelopes with HTTP 200. Source maps were re-uploaded to `sentry-poc-next-2`; stack symbolication still **Requires user-side Sentry UI confirmation**.
+- **Sentry ingest from some networks:** envelope POSTs to `ingest.us.sentry.io` may still return HTTP 403 for other reasons (project security, WAF, or network policy). Local proof that an error was **thrown** is not the same as proof it was **accepted** by Sentry. Check the Issue UI.
 - **Uptime monitor, email alerts, and Sentry MCP** need user-side configuration. The repo only provides application hooks.
 - **Session Replay and Profiling are disabled** on purpose.
 - **Native fetch vs `getTraceData()`:** these are different APIs. Default `getTraceData()` omitting `traceparent` does not mean native fetch omitted it. See section 9. There is **no** pre-fetch tracing-header workaround on the two core hops.

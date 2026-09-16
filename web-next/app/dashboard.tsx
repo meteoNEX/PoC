@@ -264,7 +264,7 @@ export function Dashboard() {
           testId: test.id,
           label: test.label,
           status: "error",
-          error: "Unhandled Promise rejection fired. Inspect sentry-poc-next Issues.",
+          error: "Unhandled Promise rejection fired. Inspect sentry-poc-next-2 Issues.",
         });
         void Promise.reject(new Error("Unhandled browser Promise rejection for Sentry PoC"));
         return;
@@ -302,7 +302,7 @@ export function Dashboard() {
           testId: test.id,
           label: test.label,
           status: "ok",
-          body: "Sentry.logger.warn sent from the browser (explicit Sentry logger). Check Logs in sentry-poc-next.",
+          body: "Sentry.logger.warn sent from the browser (explicit Sentry logger). Check Logs in sentry-poc-next-2.",
         });
         return;
       }
