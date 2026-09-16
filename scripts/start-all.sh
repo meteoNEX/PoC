@@ -14,8 +14,25 @@ set -a
 source "$ROOT/.env"
 set +a
 
+computed_release="$("$ROOT/scripts/release-id.sh")"
+if [[ -z "${SENTRY_RELEASE:-}" || "${SENTRY_RELEASE}" == "sentry-poc@1.0.0" ]]; then
+  SENTRY_RELEASE="$computed_release"
+fi
+if [[ -z "${NEXT_PUBLIC_SENTRY_RELEASE:-}" || "${NEXT_PUBLIC_SENTRY_RELEASE}" == "sentry-poc@1.0.0" ]]; then
+  NEXT_PUBLIC_SENTRY_RELEASE="${SENTRY_RELEASE}"
+fi
+export SENTRY_RELEASE NEXT_PUBLIC_SENTRY_RELEASE
+echo "Using SENTRY_RELEASE=${SENTRY_RELEASE}"
+
+chmod +x "$ROOT/scripts/"*.sh "$ROOT/scripts/"*.py 2>/dev/null || true
+
 mkdir -p "$ROOT/logs" "$ROOT/.pids"
+# Write Next.js env without copying unknown extra secrets beyond the PoC .env.
 cp "$ROOT/.env" "$ROOT/web-next/.env.local"
+{
+  echo "SENTRY_RELEASE=${SENTRY_RELEASE}"
+  echo "NEXT_PUBLIC_SENTRY_RELEASE=${NEXT_PUBLIC_SENTRY_RELEASE}"
+} >> "$ROOT/web-next/.env.local"
 
 python_setup() {
   local dir="$1"
@@ -84,4 +101,5 @@ echo "  Dashboard:            http://127.0.0.1:${NEXT_PORT:-3000}"
 echo "  Python Direct:        http://127.0.0.1:${PYTHON_DIRECT_PORT:-8001}/health"
 echo "  Spring Boot:          http://127.0.0.1:${SPRING_PORT:-8080}/health"
 echo "  Python Downstream:    http://127.0.0.1:${PYTHON_DOWNSTREAM_PORT:-8002}/health"
+echo "  release:              ${SENTRY_RELEASE}"
 echo "Logs: $ROOT/logs"

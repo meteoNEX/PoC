@@ -36,7 +36,9 @@ class ApiControllerTest {
                 .header("traceparent", "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.ok").value(true))
-        .andExpect(jsonPath("$.incoming_trace_headers['sentry-trace']").exists());
+        .andExpect(jsonPath("$.environment").exists())
+        .andExpect(jsonPath("$.incoming_trace_headers['sentry-trace']").exists())
+        .andExpect(jsonPath("$.active_span").exists());
   }
 
   @Test
@@ -56,7 +58,14 @@ class ApiControllerTest {
 
   @Test
   void logAndMetric() throws Exception {
-    mockMvc.perform(get("/api/log")).andExpect(status().isOk());
-    mockMvc.perform(get("/api/metric")).andExpect(status().isOk());
+    mockMvc
+        .perform(get("/api/log"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.log_channels.framework").value("SLF4J/Logback"))
+        .andExpect(jsonPath("$.log_channels.explicit_sentry_logger").value("Sentry.logger()"));
+    mockMvc
+        .perform(get("/api/metric"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.metrics_emitted").isArray());
   }
 }

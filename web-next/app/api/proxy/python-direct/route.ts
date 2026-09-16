@@ -1,6 +1,7 @@
 import * as Sentry from "@sentry/nextjs";
 import {
   currentTraceDebug,
+  hierarchyFromProxyBody,
   jsonHeadersFromResponse,
   recordRequestMetrics,
 } from "@/lib/observability";
@@ -32,14 +33,13 @@ export async function GET(request: Request) {
   const target = `${pythonDirectBaseUrl()}${spec.path}`;
   const controller = spec.timeoutMs ? new AbortController() : undefined;
   const timer =
-    spec.timeoutMs && controller
-      ? setTimeout(() => controller.abort(), spec.timeoutMs)
-      : undefined;
+    spec.timeoutMs && controller ? setTimeout(() => controller.abort(), spec.timeoutMs) : undefined;
 
   try {
-    const { response, outgoingTraceHeaders, sdkTraceData, w3cTraceparentSource } = await outboundFetch(target, {
-      signal: controller?.signal,
-    });
+    const { response, headersInjectedByCaller, observedUndiciHeaders, observationNote } =
+      await outboundFetch(target, {
+        signal: controller?.signal,
+      });
     const body = await readBody(response);
     const failed = !response.ok;
     recordRequestMetrics(testCase, Date.now() - started, failed);
@@ -48,9 +48,10 @@ export async function GET(request: Request) {
         ok: response.ok,
         test_case: testCase,
         target,
-        outgoing_trace_headers: outgoingTraceHeaders,
-        sdk_trace_data: sdkTraceData,
-        w3c_traceparent_source: w3cTraceparentSource,
+        headers_injected_by_next_before_fetch: headersInjectedByCaller,
+        observed_undici_headers: observedUndiciHeaders,
+        observation_note: observationNote,
+        span_hierarchy_local_evidence: hierarchyFromProxyBody(body),
         downstream_status: response.status,
         downstream_headers: jsonHeadersFromResponse(response),
         downstream_body: body,
@@ -68,6 +69,7 @@ export async function GET(request: Request) {
         test_case: testCase,
         target,
         timeout: timedOut,
+        headers_injected_by_next_before_fetch: false,
         error: error instanceof Error ? error.message : String(error),
         next_trace: currentTraceDebug(),
       },

@@ -43,12 +43,51 @@ check "spring downstream success" "$SPRING/api/downstream-success" 200
 check "next → python direct" "$NEXT/api/proxy/python-direct?mode=success" 200
 check "next → spring → python" "$NEXT/api/proxy/spring?mode=downstream-success" 200
 
+echo "=== logs / metrics ==="
+check "python-direct log" "$DIRECT/api/log" 200
+check "python-downstream log" "$DOWNSTREAM/api/log" 200
+check "spring log" "$SPRING/api/log" 200
+check "spring → python-downstream log" "$SPRING/api/downstream-log" 200
+check "next → python-direct log" "$NEXT/api/proxy/python-direct?mode=log" 200
+check "next → spring → python-downstream log" "$NEXT/api/proxy/spring?mode=downstream-log" 200
+check "python-direct metric" "$DIRECT/api/metric" 200
+check "spring metric" "$SPRING/api/metric" 200
+check "next server log" "$NEXT/api/server/log" 200
+check "next traceparent helper snapshot" "$NEXT/api/server/traceparent-helper-snapshot" 200
+
 echo "=== designed failures ==="
 check "python-direct error" "$DIRECT/api/error" 500
 check "python-downstream error" "$DOWNSTREAM/api/error" 500
 check "spring error" "$SPRING/api/error" 500
 check "next server uncaught" "$NEXT/api/server/uncaught" 500
 check "next server caught" "$NEXT/api/server/caught" 200
+check "next → python-direct error" "$NEXT/api/proxy/python-direct?mode=error" 500
+check "next → spring error" "$NEXT/api/proxy/spring?mode=error" 500
+check "next → python-downstream error" "$NEXT/api/proxy/spring?mode=downstream-error" 500
+
+echo "=== uptime endpoint ==="
+check "uptime normal" "$SPRING/api/uptime-test" 200
+check "uptime error" "$SPRING/api/uptime-test?mode=error" 500
+check "next → uptime normal" "$NEXT/api/proxy/spring?mode=uptime" 200
+check "next → uptime error" "$NEXT/api/proxy/spring?mode=uptime-error" 500
+
+echo "=== span hierarchy (parent_span_id, not only trace_id) ==="
+if python3 "$ROOT/scripts/assert-trace-hierarchy.py" \
+  "$NEXT/api/proxy/python-direct?mode=success" \
+  "Browser-equivalent Next → Python Direct"; then
+  echo "PASS  hierarchy python-direct"
+else
+  echo "FAIL  hierarchy python-direct"
+  fail=1
+fi
+if python3 "$ROOT/scripts/assert-trace-hierarchy.py" \
+  "$NEXT/api/proxy/spring?mode=downstream-success" \
+  "Browser-equivalent Next → Spring → Python Downstream"; then
+  echo "PASS  hierarchy spring-downstream"
+else
+  echo "FAIL  hierarchy spring-downstream"
+  fail=1
+fi
 
 if [[ "$fail" -ne 0 ]]; then
   echo "Smoke tests failed."

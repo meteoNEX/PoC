@@ -2,12 +2,14 @@
 
 This repository is a small, runnable architecture used to **validate whether Sentry can be the main application-observability platform** for a real frontend-plus-multi-backend system.
 
-The goal is not merely “an event arrived in Sentry”. The goal is to see whether these two paths appear as **coherent distributed traces** with correct propagation across service and language boundaries:
+The goal is not merely “an event arrived in Sentry”. The goal is to see whether these two paths appear as **coherent distributed traces** with correct **parent-child span relationships** across service and language boundaries:
 
 ```
 Browser → Next.js → Python Direct
 Browser → Next.js → Spring Boot → Python Downstream
 ```
+
+**Same `trace_id` is not sufficient proof** that distributed tracing is correct. This PoC verifies `trace_id`, `span_id`, `parent_span_id`, HTTP client spans, and downstream server spans.
 
 Frontend observability is a first-class requirement: browser errors, Web Vitals, production source maps, and browser logs/metrics where the current SDK supports them.
 
@@ -27,9 +29,8 @@ Session Replay and Profiling are **intentionally not enabled**. This PoC targets
                          │  sentry-poc-next         │
                          └───┬──────────────────┬───┘
                              │                  │
-                             │                  │ outbound fetch
-                             │                  │ sentry-trace + baggage
-                             │                  │ + W3C traceparent
+                             │                  │ native instrumented fetch
+                             │                  │ (no pre-fetch header injection)
                              ▼                  ▼
               ┌──────────────────────┐   ┌──────────────────────┐
               │ Python Direct        │   │ Spring Boot          │
@@ -37,6 +38,7 @@ Session Replay and Profiling are **intentionally not enabled**. This PoC targets
               │ sentry-poc-python-   │   │ sentry-poc-spring    │
               │ direct               │   └──────────┬───────────┘
               └──────────────────────┘              │ RestClient
+                                                    │ (Sentry native)
                                                     ▼
                                          ┌──────────────────────┐
                                          │ Python Downstream    │
@@ -48,7 +50,16 @@ Session Replay and Profiling are **intentionally not enabled**. This PoC targets
 
 CORS is not configured on the backends: the browser only talks to Next.js. Next.js and Spring make server-side HTTP calls.
 
-The inspectable Next.js outbound hop lives in `web-next/lib/outbound-fetch.ts`. A previous OpenTelemetry PoC lost the trace at that boundary. This code uses native `fetch` plus the official `Sentry.getTraceData()` helper. **Trust `downstream_body.incoming_trace_headers` as the source of truth** for what the next service actually received.
+Four Sentry projects:
+
+| Path | Projects involved |
+| --- | --- |
+| Browser → Next.js → Python Direct | `sentry-poc-next`, `sentry-poc-python-direct` (**two** projects) |
+| Browser → Next.js → Spring → Python Downstream | `sentry-poc-next`, `sentry-poc-spring`, `sentry-poc-python-downstream` (**three** projects) |
+
+The inspectable Next.js outbound hop lives in `web-next/lib/outbound-fetch.ts`. It uses **native `fetch` only**. It does **not** call `Sentry.getTraceData()` and does **not** set `sentry-trace`, `baggage`, or `traceparent` before `fetch()`. The source of truth for what was actually sent is downstream `incoming_trace_headers`.
+
+`Sentry.getTraceData()` and `Sentry.getTraceData({ propagateTraceparent: true })` are exposed on a **diagnostic-only** route (`/api/server/traceparent-helper-snapshot`). That helper is **not** a core hop and is **not** copied onto outbound requests.
 
 ## 2. Service / port table
 
@@ -83,35 +94,45 @@ Copy `.env.example` to `.env`. DSNs are public ingestion keys for this PoC.
 | `SENTRY_DSN_SPRING` | Spring Boot | Project `sentry-poc-spring` |
 | `SENTRY_DSN_PYTHON_DIRECT` | Python Direct | Project `sentry-poc-python-direct` |
 | `SENTRY_DSN_PYTHON_DOWNSTREAM` | Python Downstream | Project `sentry-poc-python-downstream` |
-| `SENTRY_ENVIRONMENT` / `NEXT_PUBLIC_SENTRY_ENVIRONMENT` | all | `poc` |
-| `SENTRY_RELEASE` / `NEXT_PUBLIC_SENTRY_RELEASE` | all | `sentry-poc@1.0.0` |
-| `SENTRY_TRACES_SAMPLE_RATE` / `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | all | **PoC-only** default `1.0` |
-| `PYTHON_DIRECT_BASE_URL` | Next.js server | Outbound to Python Direct |
-| `SPRING_BASE_URL` | Next.js server | Outbound to Spring |
+| `SENTRY_ENVIRONMENT` / `NEXT_PUBLIC_SENTRY_ENVIRONMENT` | all | default `poc` |
+| `SENTRY_RELEASE` / `NEXT_PUBLIC_SENTRY_RELEASE` | all | `sentry-poc@<git SHA>` via `scripts/release-id.sh` / `start-all.sh` |
+| `SENTRY_TRACES_SAMPLE_RATE` / `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | all | **PoC-only** default `1.0` in **both** `.env.example` **and code fallbacks** |
+| `PYTHON_DIRECT_BASE_URL` | Next.js server | Outbound to Python Direct (`localhost` or Docker DNS `python-direct`) |
+| `SPRING_BASE_URL` | Next.js server | Outbound to Spring (`localhost` or Docker DNS `spring`) |
 | `SENTRY_POC_DOWNSTREAM_BASE_URL` | Spring | Outbound to Python Downstream |
 | `SENTRY_POC_UPTIME_MODE` | Spring | Optional default for `/api/uptime-test` |
 | `SENTRY_ORG` | Next.js production build | Org slug for source map upload |
 | `SENTRY_PROJECT` | Next.js production build | `sentry-poc-next` |
-| `SENTRY_AUTH_TOKEN` | Next.js production build | **Secret.** Create later in Sentry. Never commit. |
+| `SENTRY_AUTH_TOKEN` | Next.js production build | **Secret.** Never commit. |
 
 Do not commit Sentry auth tokens, API tokens, or GitHub tokens.
 
 ### Source-map token
 
-Create the token in Sentry later:
+Create the token in Sentry:
 
 1. Open **Settings → Auth Tokens → Create New Token** (organization auth token).
 2. Grant scopes needed for release/source-map upload (commonly `project:releases` and `org:read`; follow the token wizard if Sentry shows a recommended set).
-3. Put the token in `.env` as `SENTRY_AUTH_TOKEN`.
+3. Export `SENTRY_AUTH_TOKEN` in your shell for `next build`. Do not commit it.
 4. Set `SENTRY_ORG` to your organization slug (not the numeric org id in the DSN).
 
 The Next.js production build still succeeds without this token. Source maps simply are not uploaded.
 
 ### Sampling (read this)
 
-`SENTRY_TRACES_SAMPLE_RATE=1.0` is isolated in `.env.example` so distributed-trace validation is reliable. **Production must not copy this.** Use a low rate or a `tracesSampler` / dynamic sampling. Replay and profiling stay off.
+`SENTRY_TRACES_SAMPLE_RATE=1.0` exists in `.env.example` **and** as a code fallback (`"1"` / `"1.0"`) in Next.js, Python, and Spring. It is isolated for PoC reliability. **Production must not copy this.** Use a low rate or a `tracesSampler`.
 
-Health endpoints are unsampled in the Python services (`traces_sampler` returns `0` for `/health`).
+Python `traces_sampler`:
+
+1. Always returns `0` for `/health` (even if the parent was sampled).
+2. Otherwise inherits `parent_sampled` from the incoming trace.
+3. Otherwise uses `SENTRY_TRACES_SAMPLE_RATE` (PoC default `1.0`).
+
+This matters as soon as production rates become `0.1` / `0.05` / `0.01`. Without inheriting `parent_sampled`, a sampled Next.js/Spring span can be continued by an unsampled Python transaction and the distributed trace breaks.
+
+Health endpoints are unsampled in the Python services. Spring/Next health requests may still produce traces at sample rate 1.0.
+
+Replay and profiling stay off.
 
 ## 4. Setup
 
@@ -119,7 +140,7 @@ Prerequisites: Node 20.9+, Python 3.12 (`python3-venv` on Debian/Ubuntu), Java 2
 
 ```bash
 cp .env.example .env
-# edit SENTRY_ORG later when you are ready to upload source maps
+# export SENTRY_ORG later when you are ready to upload source maps
 
 python3 -m venv backend-python-direct/.venv
 backend-python-direct/.venv/bin/pip install -r backend-python-direct/requirements.txt
@@ -130,14 +151,14 @@ backend-python-downstream/.venv/bin/pip install -r backend-python-downstream/req
 cd web-next && npm install && cd ..
 ```
 
-`./scripts/start-all.sh` performs the same setup if venvs / `node_modules` are missing.
+`./scripts/start-all.sh` performs the same setup if venvs / `node_modules` are missing. It also sets `SENTRY_RELEASE=sentry-poc@<git SHA>`.
 
 ## 5. Run
 
 Preferred local workflow (native processes, not Docker):
 
 ```bash
-chmod +x scripts/*.sh dev.sh
+chmod +x scripts/*.sh scripts/*.py dev.sh
 ./scripts/start-all.sh
 # dashboard: http://127.0.0.1:3000
 ./scripts/smoke-test.sh
@@ -147,21 +168,17 @@ chmod +x scripts/*.sh dev.sh
 Run services individually:
 
 ```bash
-# Python Direct
+export SENTRY_RELEASE="sentry-poc@$(git rev-parse HEAD)"
+export NEXT_PUBLIC_SENTRY_RELEASE="$SENTRY_RELEASE"
+
 backend-python-direct/.venv/bin/uvicorn app:app --app-dir backend-python-direct --port 8001
-
-# Python Downstream
 backend-python-downstream/.venv/bin/uvicorn app:app --app-dir backend-python-downstream --port 8002
-
-# Spring
 mvn -f backend-spring/pom.xml spring-boot:run
-
-# Next.js (copy env first)
 cp .env web-next/.env.local
 npm --prefix web-next run dev
 ```
 
-Docker is optional and only wraps these four apps:
+Docker is optional and only wraps these four apps. Compose uses Docker DNS names (`python-direct`, `spring`, `python-downstream`), which are included in Next.js `tracePropagationTargets`.
 
 ```bash
 docker compose up --build
@@ -174,6 +191,8 @@ There is no PostgreSQL, Redis, Kafka, ClickHouse, or OpenTelemetry Collector.
 Without an auth token (build must still succeed):
 
 ```bash
+export SENTRY_RELEASE="sentry-poc@$(git rev-parse HEAD)"
+export NEXT_PUBLIC_SENTRY_RELEASE="$SENTRY_RELEASE"
 cp .env web-next/.env.local
 npm --prefix web-next run build
 npm --prefix web-next run start
@@ -182,127 +201,171 @@ npm --prefix web-next run start
 With source-map upload (after creating `SENTRY_AUTH_TOKEN` and `SENTRY_ORG`):
 
 ```bash
-# .env contains SENTRY_AUTH_TOKEN, SENTRY_ORG, SENTRY_PROJECT=sentry-poc-next
-cp .env web-next/.env.local
+export SENTRY_ORG=<org slug>
+export SENTRY_PROJECT=sentry-poc-next
+export SENTRY_AUTH_TOKEN=...   # shell only, never commit
+export SENTRY_RELEASE="sentry-poc@$(git rev-parse HEAD)"
+export NEXT_PUBLIC_SENTRY_RELEASE="$SENTRY_RELEASE"
 npm --prefix web-next run build   # uploads maps, then deletes client maps from the output
 npm --prefix web-next run start
 ```
 
-Then:
+Then **user-side Sentry UI confirmation**:
 
-1. Open http://127.0.0.1:3000
-2. Run **test 1** (uncaught browser exception).
+1. Open the production dashboard.
+2. Run **test 1** (synchronous uncaught browser exception).
 3. In Sentry project `sentry-poc-next`, open the Issue.
-
-Expected result:
-
-- Stack frames point at original TypeScript / React source (`app/dashboard.tsx` or related files), not only a minified chunk.
-- Filename is meaningful.
-- Line / column are usable.
-- The event is tagged with `release=sentry-poc@1.0.0` and `environment=poc`.
+4. Confirm the stack shows original `.tsx` / `.ts` files (for example `app/dashboard.tsx`), not only a minified chunk.
+5. Confirm line / column are usable.
+6. Confirm the event `release` matches `sentry-poc@<git SHA>` and `environment=poc`.
 
 `withSentryConfig` is configured with `widenClientFileUpload` and `sourcemaps.deleteSourcemapsAfterUpload` so private maps are uploaded to Sentry and not left next to public assets.
 
+Upload success in the build log is **not** the same as UI symbolication. Treat UI confirmation as **Requires Sentry SaaS verification**.
+
 ## 7. Manual validation matrix
 
-Open the dashboard and click each card. Fill Pass/Fail yourself after inspecting Sentry.
+Open the dashboard and click each card. Fill Pass/Fail after inspecting Sentry. Column **How confirmed** is the evidence class.
 
-| Test | Expected Sentry result | Pass/Fail |
-| --- | --- | --- |
-| 1 Uncaught browser exception | Issue in `sentry-poc-next`, browser runtime, `environment=poc` |  |
-| 2 Unhandled Promise rejection | Issue in `sentry-poc-next` for the rejection |  |
-| 3 React render error | Issue from `error.tsx` / `global-error.tsx` (`captureException`) |  |
-| 4 Error boundary | Issue from explicit `captureException` in `ReportErrorBoundary` |  |
-| 5 Browser warning log | Log in `sentry-poc-next` Logs; linked to the page trace if supported |  |
-| 6 Next.js uncaught server exception | Issue in `sentry-poc-next` via `onRequestError` |  |
-| 7 Next.js caught + captureException | Issue from explicit capture; HTTP 200 from the route |  |
-| 8 Next.js server log | Log in `sentry-poc-next` with `test_case=next-server-log` |  |
-| 9 Python Direct success | One trace: Browser → Next.js → Python Direct |  |
-| 10 Python Direct error | Same trace shape; Issue in `sentry-poc-python-direct` |  |
-| 11 Spring → Downstream success | One trace: Browser → Next.js → Spring → Python Downstream |  |
-| 12 Error at Python Downstream | Trace includes Spring HTTP span + Python error Issue |  |
-| 13 Error inside Spring | Issue in `sentry-poc-spring`; Python Downstream not required |  |
-| 14 Slow request | Python Direct span ≈ 3s |  |
-| 15 Timeout path | Next.js 504 / abort; error or failed span on the Next.js side |  |
-| G1 Same error ×3 | **One** Issue, multiple events |  |
-| G2 Different error | A **separate** Issue |  |
-| M1 Metrics | `poc.request.count` / `duration` / `queue.depth` in Metrics |  |
-| U1 Uptime ok | HTTP 200; trace includes Spring + Python Downstream |  |
+| Test | Expected Sentry result | How confirmed | Pass/Fail |
+| --- | --- | --- | --- |
+| 1 Synchronous uncaught browser exception | Issue in `sentry-poc-next`, browser runtime | Requires Sentry SaaS verification |  |
+| 2 Unhandled Promise rejection | Separate Issue for the rejection | Requires Sentry SaaS verification |  |
+| 3 React render error | Issue from `error.tsx` / `global-error.tsx` | Requires Sentry SaaS verification |  |
+| 4 Error boundary | Issue from explicit `captureException` | Requires Sentry SaaS verification |  |
+| 5 Browser warning log | Log in `sentry-poc-next` Logs (`log_channel=sentry.logger`) | Requires Sentry SaaS verification |  |
+| 6 Next.js uncaught server exception | Issue via `onRequestError` | Local runtime status 500 + SaaS Issue |  |
+| 7 Next.js caught + captureException | Issue from explicit capture; HTTP 200 | Local runtime + SaaS Issue |  |
+| 8 Next.js server log | Log with `log_channel=sentry.logger` | Local runtime + SaaS Logs |  |
+| 9 Python Direct success | Two projects, HTTP client span parents Python server span | Automated hierarchy + SaaS trace tree |  |
+| 10 Python Direct error | Same shape; Issue in python-direct | Local 500 + SaaS Issue |  |
+| 11 Spring → Downstream success | Three projects; both hops parent-child | Automated hierarchy + SaaS trace tree |  |
+| 12 Error at Python Downstream | Python Downstream Issue; Spring HTTP span | Local 500 + SaaS |  |
+| 13 Error inside Spring | Issue in `sentry-poc-spring` | Local 500 + SaaS |  |
+| 14 Slow request | Python Direct span ≈ 3s | Local runtime + SaaS |  |
+| 15 Timeout path | Next.js 504 / abort | Local runtime + SaaS |  |
+| L1 Python Direct logs | stdlib + `sentry_sdk.logger` | Local runtime + SaaS Logs |  |
+| L2 Spring logs | SLF4J **and** `Sentry.logger()` are distinct | Local runtime + SaaS Logs |  |
+| L3 Python Downstream logs | Spring → Python `/api/log` | Local runtime + SaaS Logs |  |
+| G1 Same error ×3 | **One** Issue, multiple events | Requires Sentry SaaS verification |  |
+| G2 Different error | A **separate** Issue | Requires Sentry SaaS verification |  |
+| M1 Metrics | `poc.request.count` / elapsed `duration` / synthetic `queue.depth` | Requires Sentry SaaS verification |  |
+| U1 Uptime ok | HTTP 200; Spring + Python Downstream spans + structured log | Local runtime + SaaS |  |
+| U2 Uptime error | Downstream called, then Spring throws | Local 500 + SaaS Issue |  |
+| U3 Uptime slow | Obvious delay; **does not prove** Uptime monitor failure | Local runtime |  |
 
 ## 8. Expected Sentry UI result for every test
 
-Use **Issues**, **Explore → Traces**, **Logs**, and **Metrics**. Filter `environment:poc` and `release:sentry-poc@1.0.0`.
+Use **Issues**, **Explore → Traces**, **Logs**, and **Metrics**. Filter `environment:poc` and the current `release` (`sentry-poc@<git SHA>`).
 
-- **Browser errors (1–4):** Issues in `sentry-poc-next`. Culprit is a UI file. Test 4 should mention the boundary capture.
-- **Browser log (5):** Logs product, not necessarily an Issue.
+- **Browser errors (1–4):** Issues in `sentry-poc-next`. Test 1 is a **synchronous** click-handler throw. Test 2 is a **Promise rejection**. They must not be the same mechanism.
+- **Browser log (5):** Logs product via `Sentry.logger`, not `console.warn`.
 - **Server errors (6–7):** Node runtime, route `/api/server/*`.
-- **Server log (8):** Logs with attributes `service`, `test_case`, `request_kind`.
-- **Trace 9:** Three projects/services in one trace id. Python Direct response JSON echoes `sentry-trace` / `traceparent`.
-- **Trace 10:** Same as 9 plus an error event on the Python Direct project.
-- **Trace 11:** Four hops. Spring JSON includes `downstream.incoming_trace_headers`.
-- **Trace 12:** Python Downstream Issue; Spring span for the failed HTTP call.
-- **Trace 13:** Spring Issue `Uncaught Spring Boot exception for Sentry PoC`.
-- **Slow (14):** Long Python span.
-- **Timeout (15):** Next.js capture of the aborted fetch; Python may still complete if abort is late — check the Next.js span status.
-- **Grouping:** G1 collapses; G2 does not share G1’s fingerprint.
-- **Metrics:** Low-cardinality attributes only (`service`, `environment`, `test_case`, `request_kind`).
-- **Uptime:** See section 15.
+- **Server log (8):** Explicit `Sentry.logger` with attributes `service`, `test_case`, `request_kind`, `log_channel`.
+- **Trace 9:** **Two** projects (`sentry-poc-next` + `sentry-poc-python-direct`). Expected abstract tree:
+  - Browser transaction / browser span
+  - → Next.js server span
+  - → Next.js HTTP client span (`http.client`)
+  - → Python Direct server span (`parent_span_id` = HTTP client span id)
+- **Trace 11:** **Three** projects. Expected abstract tree:
+  - Browser transaction / browser span
+  - → Next.js server span
+  - → Next.js HTTP client span
+  - → Spring server span
+  - → Spring HTTP client span
+  - → Python Downstream server span
+- If the current Browser SDK models pageload vs fetch slightly differently, record the actual tree, but the HTTP client span **must** be the parent of the downstream server span (or the SDK’s documented equivalent).
+- **Logs L1–L3:** See section 10. Framework logging ≠ explicit Sentry logger.
+- **Metrics:** `poc.request.duration` is elapsed wall time. `poc.queue.depth` is a **synthetic gauge example** — there is no real queue.
+- **Uptime:** See section 15. Do not claim a 4s delay always fails a Sentry Uptime monitor.
 
 ## 9. How to identify whether the same trace crosses projects
 
 1. Run test 9 or 11.
-2. Copy a `trace_id` from the dashboard payload (`active_span.trace_id`, `next_trace.activeSpan.traceId`, or `x-sentry-poc-trace-id` style fields).
-3. In Sentry, open **Explore → Traces** (or an Issue → Trace) and paste the id.
-4. A passing result shows **one trace id** with spans from multiple projects:
+2. Copy identifiers from the dashboard payload: `active_span.trace_id`, `active_span.span_id`, `active_span.parent_span_id`, `span_hierarchy_local_evidence`.
+3. In Sentry, open **Explore → Traces** (or an Issue → Trace) and paste the trace id.
+4. A passing result shows **one trace id** with a **correct parent-child tree**, not merely the same id on sibling spans:
    - Test 9: `sentry-poc-next` + `sentry-poc-python-direct`
    - Test 11: `sentry-poc-next` + `sentry-poc-spring` + `sentry-poc-python-downstream`
-5. If you only see the Next.js span, the outbound fetch hop broke. Inspect `outgoing_trace_headers` vs `incoming_trace_headers`. They should share the same 32-hex trace id.
+5. Local evidence in the JSON:
+   - `headers_injected_by_next_before_fetch` must be `false`
+   - `incoming_trace_headers['sentry-trace']` span id must equal downstream `active_span.parent_span_id`
+   - that span id must **differ** from the Next.js route `next_trace.activeSpan.spanId` (the HTTP client span is not the route span)
+6. `scripts/assert-trace-hierarchy.py` (invoked by `smoke-test.sh`) checks those local relationships. The Sentry UI tree is still **Requires Sentry SaaS verification**.
 
-Sentry still primarily propagates `sentry-trace` and `baggage`. This PoC also sets `propagateTraceparent: true` (JS) and `sentry.propagate-traceparent=true` (Java) so W3C `traceparent` is sent as well. Python continues incoming Sentry headers automatically via the FastAPI integration.
+### Native Next.js outbound fetch headers
+
+Do **not** use a pre-fetch `Sentry.getTraceData()` snapshot as proof of wire headers.
+
+`@sentry/nextjs` 10.75.0 Node instrumentation (`@sentry/node-core` `addTracePropagationHeadersToFetchRequest`) creates the HTTP client span, then calls `getTraceData({ propagateTraceparent })` using the **client option** `propagateTraceparent` (this PoC sets it `true`). If the URL matches `tracePropagationTargets`, native fetch may send:
+
+- `sentry-trace`
+- `baggage`
+- `traceparent` (when `propagateTraceparent: true` and the helper returns it)
+
+Default `Sentry.getTraceData()` **without** `{ propagateTraceparent: true }` often omits `traceparent`. That is a helper-API difference, not proof that native fetch omits `traceparent`.
+
+What this process **actually sent** is recorded in:
+
+- `downstream_body.incoming_trace_headers` (canonical)
+- `observed_undici_headers` (best-effort undici `sendHeaders` diagnostic)
+
+`tracePropagationTargets` includes `localhost`, `127.0.0.1`, `python-direct`, `spring`, `python-downstream`, and `/^\//` so native and Docker DNS hosts both propagate.
+
+Spring → Python Downstream uses official Sentry RestClient instrumentation (`SentrySpanRestClientCustomizer`) with `sentry.propagate-traceparent=true`. No manual header injection.
 
 ## 10. How to verify logs are correlated
 
-1. Run tests 5, 8, Python Direct `/api/log` (dashboard test 8 plus a Python success/log via `/api/proxy/python-direct?mode=log` if you curl it), Spring test via `/api/proxy/spring?mode=log`.
-2. Open **Logs**.
-3. Filter `service:sentry-poc-next` (or spring / python service names) and `test_case:...`.
-4. Open a log. Current SDKs attach `trace_id` when a span is active. Use **View Trace** / the trace id to jump to Traces.
-5. If a log has no trace id, the SDK emitted it outside an active span — document that as a limitation rather than inventing a fake span.
+Distinguish channels:
 
-Curl helpers:
+| Service | Framework logging | Explicit Sentry logger |
+| --- | --- | --- |
+| Next.js | Next.js / `console` (not claimed as verified auto-ingest) | `Sentry.logger` (`log_channel=sentry.logger`) |
+| Spring | SLF4J / Logback (`log_channel=slf4j`) | `Sentry.logger()` |
+| Python | `logging.Logger` (`log_channel=stdlib`) | `sentry_sdk.logger` |
+
+`Sentry.logger()` succeeding is **not** proof that ordinary Spring/Python logs are auto-collected into the Sentry Logs product. That auto-collection **Requires Sentry SaaS verification**.
 
 ```bash
 curl -sS http://127.0.0.1:3000/api/server/log
 curl -sS http://127.0.0.1:3000/api/proxy/python-direct?mode=log
 curl -sS http://127.0.0.1:3000/api/proxy/spring?mode=log
+curl -sS http://127.0.0.1:3000/api/proxy/spring?mode=downstream-log
 ```
+
+Python Downstream logs are exercised by `mode=downstream-log` (Spring RestClient → `/api/log`), not only by hitting Python directly.
 
 ## 11. How to verify source maps
 
-See section 6. Confirm the Issue stack is original TS/React, not `app-*.js`. If stacks stay minified, the usual cause is a missing `SENTRY_AUTH_TOKEN` / wrong `SENTRY_ORG` at `next build` time.
+See section 6. Confirm the Issue stack is original TS/React, not `app-*.js`. If stacks stay minified, the usual cause is a missing `SENTRY_AUTH_TOKEN` / wrong `SENTRY_ORG` at `next build` time. UI symbolication **Requires Sentry SaaS verification**.
 
 ## 12. How to verify Web Vitals
 
-The current `@sentry/nextjs` browser SDK records Web Vitals on **real page loads and interactions**. This PoC does **not** fake LCP/INP/CLS/TTFB.
+The current `@sentry/nextjs` / `@sentry/browser` SDK records Web Vitals from **real page loads and interactions**. This PoC does **not** fake LCP/INP/CLS/TTFB.
 
-| Vital | How it appears | What you must do |
+`browserTracingIntegration()` auto-registers `webVitalsIntegration`.
+
+| Vital | How the current SDK produces it | Where to look in Sentry |
 | --- | --- | --- |
-| LCP | Measurement on the pageload transaction | Load `/` and wait for the largest paint (hero + cards). |
-| TTFB | Measurement on pageload | Load `/`. |
-| CLS | Measurement on pageload / window | Load `/`; avoid huge layout shifts. May be ~0. |
-| INP | Requires a real interaction | Click several **Run test** buttons, then wait; INP is sent after interaction (and may wait until idle/hidden). |
+| LCP | Pageload span measurement (and optionally a standalone/streamed LCP span depending on span-streaming experiments). Produced on a real page load when the largest contentful paint happens. | `pageload` transaction measurements, and/or an LCP web-vital span |
+| CLS | Same as LCP: pageload measurement unless standalone CLS spans are enabled. Needs layout shift on the page; may be ~0. | `pageload` measurements and/or a CLS web-vital span |
+| TTFB | Navigation / pageload timing, not an interaction vital. Produced on load. | `pageload` measurements |
+| INP | **Not** something you should expect only as a pageload measurement. Current SDK tracks INP via `startTrackingINP` / `trackInpAsSpan` and emits a **standalone web-vital span** with `op` like `ui.interaction.click` (or hover/drag/press) after a real interaction. `registerInpInteractionListener` caches the element. INP is sent after interaction (and may wait until idle/hidden). Missing INP on a `pageload` transaction does **not** mean “the user did not interact enough” as a complete explanation — look for **interaction / INP spans** as well. | Interaction web-vital spans (`ui.interaction.*`), not only pageload measurements |
 
-In Sentry: open a `pageload` transaction for `/` in `sentry-poc-next` and inspect Measurements. If INP is missing, you have not interacted enough — that is expected, not a product failure.
+Web Vitals will not appear from `curl`. They **Require a real browser session + Sentry SaaS verification**.
 
 ## 13. How to verify metrics
 
 Run dashboard **M1** (and any other tests). In Sentry **Metrics** look for:
 
-- `poc.request.count`
-- `poc.failure.count` (error tests)
-- `poc.request.duration`
-- `poc.queue.depth`
+| Metric | What it is |
+| --- | --- |
+| `poc.request.count` | Real counter (1 per recorded request) |
+| `poc.failure.count` | Real counter on failure paths |
+| `poc.request.duration` | **Elapsed wall time** in milliseconds (`measurement=elapsed_wall_time`) |
+| `poc.queue.depth` | **Synthetic gauge example.** There is no real message queue. Attribute `synthetic_example=true` / `note=no-real-queue`. |
 
-Filter by `service` / `test_case`. Volume is intentionally tiny.
+Filter by `service` / `test_case`. Volume is intentionally tiny. Appearance in the Metrics product **Requires Sentry SaaS verification**.
 
 ## 14. How to verify issue grouping
 
@@ -311,7 +374,7 @@ Filter by `service` / `test_case`. Volume is intentionally tiny.
 3. Run **G2** (`TypeError("sentry-poc grouping: different type")`).
 4. Confirm a second Issue.
 
-You can repeat G1 from Python/Spring with `/api/grouping-same` if you want backend grouping too.
+Grouping **Requires Sentry SaaS verification**.
 
 ## 15. Later Uptime test
 
@@ -319,18 +382,29 @@ You can repeat G1 from Python/Spring with `/api/grouping-same` if you want backe
 
 | URL | Behavior |
 | --- | --- |
-| `/api/uptime-test` | HTTP 200, calls Python Downstream `/api/success`, produces a distributed trace |
-| `/api/uptime-test?mode=error` | Calls downstream, then throws — Sentry Issue + trace |
-| `/api/uptime-test?mode=slow` | Calls downstream, sleeps ~4s, HTTP 200 |
+| `/api/uptime-test` or `?mode=normal` | Calls Python Downstream `/api/success`, structured business log, HTTP 200, distributed trace |
+| `/api/uptime-test?mode=error` | Calls Python Downstream first, then Spring throws — Sentry Issue + trace |
+| `/api/uptime-test?mode=slow` | Calls downstream, sleeps ~4s, HTTP 200, structured log |
 | `SENTRY_POC_UPTIME_MODE=error` | Same as `mode=error` without changing the URL |
+
+The endpoint has:
+
+- a Spring server span / trace
+- a downstream Python span
+- structured business logs (`SLF4J` + `Sentry.logger()`)
+- an explicit error mode
 
 This PoC does **not** create the Uptime monitor. In Sentry later: **Alerts → Uptime** (or the current Uptime UI), URL `http://<public-host>:8080/api/uptime-test`. Developer-plan quota is one uptime monitor — use this endpoint only.
 
 The URL must be reachable from Sentry’s probes (a public tunnel, not `127.0.0.1`).
 
+**A 4 second delay does not necessarily fail an Uptime check.** Failure depends on the monitor timeout configured in Sentry.
+
+Uptime monitor creation **Requires user-side follow-up**.
+
 ## 16. Later Email alert validation
 
-Not configured here (no alert rules are created by this repo).
+Not configured here (no alert rules are created by this repo). **Requires user-side follow-up.**
 
 Later, in Sentry:
 
@@ -341,7 +415,7 @@ Later, in Sentry:
 
 ## 17. Later Sentry MCP validation
 
-Not configured here (no OAuth client is created by this repo).
+Not configured here (no OAuth client is created by this repo). **Requires user-side follow-up.**
 
 Later:
 
@@ -351,18 +425,17 @@ Later:
 
 ## 18. Known limitations
 
-Filled from implementation against current official SDKs. Update the Pass/Fail column as you run the matrix.
-
-- **Source maps** require a user-created `SENTRY_AUTH_TOKEN` and `SENTRY_ORG`. The app runs without them.
-- **Uptime, email alerts, and Sentry MCP** need user-side configuration. The repo only provides the application hooks.
+- **Source maps:** build-plugin upload can be confirmed from logs. Original-source stack traces in the Issue UI **Require Sentry SaaS verification**.
+- **Uptime monitor, email alerts, and Sentry MCP** need user-side configuration. The repo only provides application hooks.
 - **Session Replay and Profiling are disabled** on purpose.
-- **W3C `traceparent` on the Next.js outbound hop:** `@sentry/nextjs` 10.75.0 with `propagateTraceparent: true` still did **not** attach `traceparent` on Node `fetch`. `Sentry.getTraceData()` returns only `sentry-trace` and `baggage`. Sentry correlation still worked because those headers continued the same trace id into Spring and Python Direct. Java `sentry.propagate-traceparent=true` **did** attach W3C `traceparent` on Spring → Python Downstream automatically. `web-next/lib/outbound-fetch.ts` therefore derives `traceparent` from the SDK `sentry-trace` value (same mapping the JS SDK documents) and reports `w3c_traceparent_source` in the JSON so this is inspectable, not hidden.
-- **Sentry native tracing** uses `sentry-trace` + `baggage`. That path is intact: Next.js, Spring, and Python Downstream all shared one 32-hex trace id in local verification.
-- **Next.js outbound fetch** is the historically fragile boundary. This PoC merges official `Sentry.getTraceData()` onto `fetch` and disables fetch caching (`cache: 'no-store'`). If headers are still missing in `incoming_trace_headers`, treat that as a real platform limitation — do not paper over it with a custom propagator.
+- **Native fetch vs `getTraceData()`:** these are different APIs. Default `getTraceData()` omitting `traceparent` does not mean native fetch omitted it. See section 9. There is **no** pre-fetch tracing-header workaround on the two core hops.
+- **Response debug headers** (`x-sentry-poc-*`) are best-effort and may be missing if the response is committed or the request throws. They are **not** acceptance criteria.
 - **Health traces** are dropped in Python via `traces_sampler`. Spring/Next health requests may still produce traces at sample rate 1.0.
-- **Web Vitals** are not present until a real browser session; they will not appear from `curl`.
+- **Web Vitals** need a real browser session; they will not appear from `curl`.
+- **`poc.queue.depth` is synthetic.** Do not treat it as a real queue metric.
+- **Framework logs vs Sentry.logger:** explicit Sentry logger is implemented. Auto-ingest of SLF4J/stdlib logs into Sentry Logs **Requires Sentry SaaS verification**.
 - **Developer-plan quotas** are small. Clicking every dashboard button a few times is in-scope; a load test is not.
-- OpenTelemetry is **not** added. Spring Boot Sentry docs mention an optional OpenTelemetry agent; this PoC uses native Sentry Spring Boot 4 instrumentation and `RestClient.Builder` so `SentrySpanRestClientCustomizer` can run.
+- OpenTelemetry is **not** added. Spring uses native Sentry Spring Boot 4 instrumentation and `RestClient.Builder` so `SentrySpanRestClientCustomizer` can run.
 
 ## 19. Approximate Developer-plan usage
 
@@ -372,7 +445,7 @@ A full manual pass (each dashboard button once, G1 three events, one production 
 | --- | --- |
 | Error events | ~15–30 (including grouping repeats) |
 | Transactions / spans | tens to low hundreds at `tracesSampleRate=1.0` |
-| Logs | ~10 structured logs |
+| Logs | ~10–20 structured logs |
 | Metrics | a few dozen data points |
 | Replays / profiles | 0 |
 | Attachments / source maps | 1 release upload when the token is set |
@@ -381,18 +454,27 @@ Stay well under typical Developer-plan error/transaction allowances if you do no
 
 ---
 
-## Automated tests
+## Automated tests vs Sentry SaaS
 
-These check boot/routing locally. They are not a substitute for the Sentry UI matrix.
+Automated tests check local routing, sampler inheritance, header echo, and **parent_span_id** relationships. They do **not** fake a Sentry backend.
 
 ```bash
 backend-python-direct/.venv/bin/pytest backend-python-direct
 backend-python-downstream/.venv/bin/pytest backend-python-downstream
 mvn -f backend-spring/pom.xml test
+npm --prefix web-next test
 ./scripts/start-all.sh && ./scripts/smoke-test.sh
 ```
 
-Smoke tests verify health, success routes, inter-service calls, and designed error status codes.
+| Check | Evidence class |
+| --- | --- |
+| HTTP status / routing | Automated tests |
+| Python `parent_sampled` inheritance | Automated tests |
+| Downstream echo of `sentry-trace` / `baggage` / `traceparent` | Automated + local runtime |
+| `parent_span_id` equals incoming HTTP client span id | Automated smoke (`assert-trace-hierarchy.py`) + local runtime |
+| Sentry UI span tree, Issues, Logs product, Metrics product, Web Vitals, grouping, source-map symbolication | **Requires Sentry SaaS verification** |
+
+Smoke tests verify health, success routes, inter-service calls, designed error status codes, logs, metrics, uptime modes, and local span hierarchy.
 
 ## Project layout
 
@@ -404,6 +486,8 @@ Smoke tests verify health, success routes, inter-service calls, and designed err
 ├── scripts/start-all.sh
 ├── scripts/stop-all.sh
 ├── scripts/smoke-test.sh
+├── scripts/assert-trace-hierarchy.py
+├── scripts/release-id.sh
 ├── docker-compose.yml            optional
 ├── .env.example
 └── README.md

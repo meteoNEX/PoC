@@ -48,23 +48,30 @@ public class ApiController {
 
   @GetMapping("/api/success")
   public Map<String, Object> success(HttpServletRequest request) {
-    observability.recordRequest("spring-success", 1, false);
-    return envelope(request, "spring-success", true, null);
+    long started = System.nanoTime();
+    Map<String, Object> body = envelope(request, "spring-success", true, null);
+    observability.recordRequest("spring-success", elapsedMs(started), false);
+    return body;
   }
 
   @GetMapping("/api/error")
   public Map<String, Object> error() {
-    observability.recordRequest("spring-uncaught", 1, true);
-    throw new RuntimeException("Uncaught Spring Boot exception for Sentry PoC");
+    long started = System.nanoTime();
+    try {
+      throw new RuntimeException("Uncaught Spring Boot exception for Sentry PoC");
+    } finally {
+      observability.recordRequest("spring-uncaught", elapsedMs(started), true);
+    }
   }
 
   @GetMapping("/api/caught-error")
   public Map<String, Object> caughtError(HttpServletRequest request) {
+    long started = System.nanoTime();
     try {
       throw new RuntimeException("Caught Spring Boot exception for Sentry PoC");
     } catch (RuntimeException ex) {
       Sentry.captureException(ex);
-      observability.recordRequest("spring-caught", 1, true);
+      observability.recordRequest("spring-caught", elapsedMs(started), true);
       Map<String, Object> body = envelope(request, "spring-caught", false, null);
       body.put("captured", true);
       return body;
@@ -73,56 +80,87 @@ public class ApiController {
 
   @GetMapping("/api/downstream-success")
   public Map<String, Object> downstreamSuccess(HttpServletRequest request) {
+    long started = System.nanoTime();
     Map<String, Object> downstream = getDownstream(pythonDownstream, "/api/success");
-    observability.recordRequest("spring-downstream-success", 1, false);
+    observability.recordRequest("spring-downstream-success", elapsedMs(started), false);
     return envelope(request, "spring-downstream-success", true, downstream);
   }
 
   @GetMapping("/api/downstream-error")
   public Map<String, Object> downstreamError(HttpServletRequest request) {
-    observability.recordRequest("spring-downstream-error", 1, true);
-    getDownstream(pythonDownstream, "/api/error");
-    return envelope(request, "spring-downstream-error", false, null);
+    long started = System.nanoTime();
+    try {
+      getDownstream(pythonDownstream, "/api/error");
+      observability.recordRequest("spring-downstream-error", elapsedMs(started), true);
+      return envelope(request, "spring-downstream-error", false, null);
+    } catch (RuntimeException ex) {
+      observability.recordRequest("spring-downstream-error", elapsedMs(started), true);
+      throw ex;
+    }
   }
 
   @GetMapping("/api/downstream-slow")
   public Map<String, Object> downstreamSlow(HttpServletRequest request) {
+    long started = System.nanoTime();
     Map<String, Object> downstream = getDownstream(pythonDownstream, "/api/slow?delay_ms=3000");
-    observability.recordRequest("spring-downstream-slow", 3000, false);
+    observability.recordRequest("spring-downstream-slow", elapsedMs(started), false);
     return envelope(request, "spring-downstream-slow", true, downstream);
   }
 
   @GetMapping("/api/downstream-timeout")
   public Map<String, Object> downstreamTimeout(HttpServletRequest request) {
+    long started = System.nanoTime();
     try {
       getDownstream(pythonDownstreamStrict, "/api/slow?delay_ms=5000");
-      observability.recordRequest("spring-downstream-timeout", 1000, false);
+      observability.recordRequest("spring-downstream-timeout", elapsedMs(started), false);
       return envelope(request, "spring-downstream-timeout", true, null);
     } catch (RestClientException ex) {
       Sentry.captureException(ex);
-      observability.recordRequest("spring-downstream-timeout", 1000, true);
+      observability.recordRequest("spring-downstream-timeout", elapsedMs(started), true);
       throw new ResponseStatusException(
           HttpStatus.GATEWAY_TIMEOUT, "Spring RestClient timed out calling Python Downstream", ex);
     }
   }
 
+  @GetMapping("/api/downstream-log")
+  public Map<String, Object> downstreamLog(HttpServletRequest request) {
+    long started = System.nanoTime();
+    Map<String, Object> downstream = getDownstream(pythonDownstream, "/api/log");
+    observability.recordRequest("spring-downstream-log", elapsedMs(started), false);
+    return envelope(request, "spring-downstream-log", true, downstream);
+  }
+
   @GetMapping("/api/log")
   public Map<String, Object> logEndpoint(HttpServletRequest request) {
-    log.error("Spring Boot ERROR log for Sentry PoC test_case=spring-log request_kind=log");
+    long started = System.nanoTime();
+    log.info(
+        "Spring Boot SLF4J/Logback INFO log for Sentry PoC test_case=spring-log log_channel=slf4j");
     observability.structuredLog(
-        "spring-log", "Spring Boot structured ERROR log correlated with the active trace");
-    observability.recordRequest("spring-log", 1, false);
-    return envelope(request, "spring-log", true, null);
+        "spring-log", "Spring Boot explicit Sentry.logger() correlated with the active trace");
+    observability.recordRequest("spring-log", elapsedMs(started), false);
+    Map<String, Object> body = envelope(request, "spring-log", true, null);
+    body.put(
+        "log_channels",
+        Map.of(
+            "framework", "SLF4J/Logback",
+            "explicit_sentry_logger", "Sentry.logger()"));
+    body.put(
+        "log_note",
+        "Sentry.logger() succeeding is not proof that ordinary Spring logs are auto-collected.");
+    return body;
   }
 
   @GetMapping("/api/metric")
   public Map<String, Object> metric(HttpServletRequest request) {
-    observability.recordRequest("spring-metric", 15, false);
+    long started = System.nanoTime();
+    observability.recordRequest("spring-metric", elapsedMs(started), false);
     Map<String, Object> body = envelope(request, "spring-metric", true, null);
     body.put(
         "metrics_emitted",
         new String[] {
-          "poc.request.count", "poc.request.duration", "poc.queue.depth"
+          "poc.request.count",
+          "poc.request.duration (elapsed_wall_time)",
+          "poc.queue.depth (synthetic_example, no real queue)"
         });
     return body;
   }
@@ -131,34 +169,50 @@ public class ApiController {
    * Single URL intended for a later Sentry Developer-plan Uptime monitor.
    *
    * <p>{@code GET /api/uptime-test} — HTTP 200 and a call to Python Downstream.<br>
-   * {@code GET /api/uptime-test?mode=error} — controlled failure + Sentry issue.<br>
+   * {@code GET /api/uptime-test?mode=error} — call downstream, then throw.<br>
    * {@code GET /api/uptime-test?mode=slow} — delayed 200, still traces downstream.
    *
-   * <p>When {@code mode} is omitted, {@code SENTRY_POC_UPTIME_MODE} is used.
+   * <p>A ~4s delay does not by itself mean a Sentry Uptime monitor will fail. That
+   * depends on the monitor timeout configured in Sentry.
    */
   @GetMapping("/api/uptime-test")
   public Map<String, Object> uptimeTest(
       HttpServletRequest request, @RequestParam(required = false) String mode)
       throws InterruptedException {
+    long started = System.nanoTime();
     String effective = (mode == null || mode.isBlank()) ? uptimeMode : mode;
     if (effective == null || effective.isBlank()) {
-      effective = "ok";
+      effective = "normal";
     }
+    if ("ok".equalsIgnoreCase(effective)) {
+      effective = "normal";
+    }
+
+    log.info(
+        "uptime_check service={} environment={} mode={} request_kind=uptime log_channel=slf4j",
+        Observability.SERVICE,
+        observability.environment(),
+        effective);
+    observability.structuredLog(
+        "spring-uptime-" + effective.toLowerCase(),
+        "Uptime test structured business log mode=" + effective);
 
     Map<String, Object> downstream = getDownstream(pythonDownstream, "/api/success");
 
     if ("error".equalsIgnoreCase(effective)) {
-      observability.recordRequest("spring-uptime-error", 1, true);
+      observability.recordRequest("spring-uptime-error", elapsedMs(started), true);
       throw new RuntimeException("Uptime test controlled failure for Sentry PoC");
     }
 
     if ("slow".equalsIgnoreCase(effective)) {
       Thread.sleep(4000);
-      observability.recordRequest("spring-uptime-slow", 4000, false);
-      return envelope(request, "spring-uptime-slow", true, downstream);
+      observability.recordRequest("spring-uptime-slow", elapsedMs(started), false);
+      Map<String, Object> body = envelope(request, "spring-uptime-slow", true, downstream);
+      body.put("delay_note", "Sleep is ~4s. Uptime monitor failure depends on Sentry timeout.");
+      return body;
     }
 
-    observability.recordRequest("spring-uptime-ok", 1, false);
+    observability.recordRequest("spring-uptime-ok", elapsedMs(started), false);
     return envelope(request, "spring-uptime-ok", true, downstream);
   }
 
@@ -181,6 +235,7 @@ public class ApiController {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("ok", ok);
     body.put("service", Observability.SERVICE);
+    body.put("environment", observability.environment());
     body.put("test_case", testCase);
     body.put("incoming_trace_headers", observability.incomingTraceHeaders(request));
     body.put("active_span", observability.activeSpan());
@@ -188,5 +243,9 @@ public class ApiController {
       body.put("downstream", downstream);
     }
     return body;
+  }
+
+  private static double elapsedMs(long startedNanos) {
+    return (System.nanoTime() - startedNanos) / 1_000_000.0;
   }
 }

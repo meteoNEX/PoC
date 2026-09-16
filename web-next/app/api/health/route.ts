@@ -3,7 +3,8 @@ import { currentTraceDebug, recordRequestMetrics } from "@/lib/observability";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  recordRequestMetrics("next-health", 1);
+  const started = Date.now();
+  recordRequestMetrics("next-health", Date.now() - started);
   return Response.json({
     ok: true,
     service: "sentry-poc-next",

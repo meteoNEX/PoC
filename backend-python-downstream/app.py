@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from typing import Any
@@ -14,6 +15,7 @@ from sentry_setup import ENVIRONMENT, SERVICE, init_sentry
 init_sentry()
 
 app = FastAPI(title="Sentry PoC Python Downstream", version="1.0.0")
+stdlib_log = logging.getLogger("sentry_poc.python_downstream")
 
 
 def _incoming_trace_headers(request: Request) -> dict[str, str | None]:
@@ -28,8 +30,21 @@ def _incoming_trace_headers(request: Request) -> dict[str, str | None]:
 def _active_span() -> dict[str, str | None]:
     span = sentry_sdk.get_current_span()
     if span is None:
-        return {"trace_id": None, "span_id": None}
-    return {"trace_id": span.trace_id, "span_id": span.span_id}
+        return {
+            "trace_id": None,
+            "span_id": None,
+            "parent_span_id": None,
+            "sampled": None,
+            "op": None,
+        }
+    sampled = getattr(span, "sampled", None)
+    return {
+        "trace_id": span.trace_id,
+        "span_id": span.span_id,
+        "parent_span_id": getattr(span, "parent_span_id", None),
+        "sampled": None if sampled is None else str(bool(sampled)),
+        "op": getattr(span, "op", None),
+    }
 
 
 def _envelope(request: Request, test_case: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -37,7 +52,7 @@ def _envelope(request: Request, test_case: str, extra: dict[str, Any] | None = N
         "ok": True,
         "service": SERVICE,
         "environment": ENVIRONMENT,
-        "release": os.getenv("SENTRY_RELEASE", "sentry-poc@1.0.0"),
+        "release": os.getenv("SENTRY_RELEASE"),
         "test_case": test_case,
         "incoming_trace_headers": _incoming_trace_headers(request),
         "active_span": _active_span(),
@@ -55,8 +70,17 @@ def _record_metrics(test_case: str, duration_ms: float, failed: bool = False) ->
         "request_kind": "http",
     }
     metrics.count("poc.request.count", 1, attributes=attributes)
-    metrics.distribution("poc.request.duration", duration_ms, unit="millisecond", attributes=attributes)
-    metrics.gauge("poc.queue.depth", 2, attributes=attributes)
+    metrics.distribution(
+        "poc.request.duration",
+        duration_ms,
+        unit="millisecond",
+        attributes={**attributes, "measurement": "elapsed_wall_time"},
+    )
+    metrics.gauge(
+        "poc.queue.depth",
+        2,
+        attributes={**attributes, "synthetic_example": True, "note": "no-real-queue"},
+    )
     if failed:
         metrics.count("poc.failure.count", 1, attributes=attributes)
 
@@ -70,7 +94,11 @@ async def attach_trace_response_headers(request: Request, call_next):
     if span is not None:
         response.headers["x-sentry-poc-trace-id"] = span.trace_id or ""
         response.headers["x-sentry-poc-span-id"] = span.span_id or ""
+        parent = getattr(span, "parent_span_id", None)
+        if parent:
+            response.headers["x-sentry-poc-parent-span-id"] = parent
     response.headers["x-sentry-poc-service"] = SERVICE
+    response.headers["x-sentry-poc-headers-note"] = "best-effort-debug-only"
     return response
 
 
@@ -81,8 +109,9 @@ def health() -> dict[str, Any]:
 
 @app.get("/api/success")
 def success(request: Request) -> dict[str, Any]:
+    started = time.perf_counter()
     sentry_sdk.set_attribute("test_case", "python-downstream-success")
-    _record_metrics("python-downstream-success", 1)
+    _record_metrics("python-downstream-success", (time.perf_counter() - started) * 1000)
     return _envelope(request, "python-downstream-success")
 
 
@@ -104,15 +133,30 @@ async def slow(request: Request, delay_ms: int = 3000) -> dict[str, Any]:
 
 @app.get("/api/log")
 def log_endpoint(request: Request) -> dict[str, Any]:
+    started = time.perf_counter()
     sentry_sdk.set_attribute("test_case", "python-downstream-log")
+    stdlib_log.info(
+        "Python Downstream stdlib logging (framework logging, log_channel=stdlib)",
+        extra={"test_case": "python-downstream-log", "log_channel": "stdlib"},
+    )
     sentry_sdk.logger.info(
-        "Python Downstream structured log correlated with the active trace",
+        "Python Downstream explicit sentry_sdk.logger correlated with the active trace",
         attributes={
             "service": SERVICE,
             "environment": ENVIRONMENT,
             "test_case": "python-downstream-log",
             "request_kind": "log",
+            "log_channel": "sentry.logger",
         },
     )
-    _record_metrics("python-downstream-log", 1)
-    return _envelope(request, "python-downstream-log")
+    _record_metrics("python-downstream-log", (time.perf_counter() - started) * 1000)
+    return _envelope(
+        request,
+        "python-downstream-log",
+        {
+            "log_channels": {
+                "framework": "stdlib logging.Logger",
+                "explicit_sentry_logger": "sentry_sdk.logger",
+            }
+        },
+    )

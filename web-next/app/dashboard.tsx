@@ -2,11 +2,7 @@
 
 import { useMemo, useState } from "react";
 import * as Sentry from "@sentry/nextjs";
-import {
-  BoomOnRender,
-  BoundaryBoomOnRender,
-  ReportErrorBoundary,
-} from "./error-demos";
+import { BoomOnRender, BoundaryBoomOnRender, ReportErrorBoundary } from "./error-demos";
 
 type RunState = {
   testId: string;
@@ -29,15 +25,16 @@ type TestDef = {
 const TESTS: TestDef[] = [
   {
     id: "1",
-    label: "Uncaught browser exception",
-    detail: "Throws in a click handler. Sentry browser SDK should open an Issue.",
+    label: "Synchronous uncaught browser exception",
+    detail:
+      "Throws synchronously in the button click handler. This is NOT a rejected Promise.",
     kind: "client",
     clientAction: "throw",
   },
   {
     id: "2",
     label: "Unhandled Promise rejection",
-    detail: "Rejects a Promise with no catch. Browser SDK should capture it.",
+    detail: "Rejects a Promise with no catch. Separate from test 1.",
     kind: "client",
     clientAction: "reject",
   },
@@ -58,7 +55,7 @@ const TESTS: TestDef[] = [
   {
     id: "5",
     label: "Browser warning log",
-    detail: "Sentry.logger.warn from the browser, correlated with the current page trace.",
+    detail: "Sentry.logger.warn from the browser (explicit Sentry logger, not console.warn).",
     kind: "client",
     clientAction: "log",
   },
@@ -79,28 +76,28 @@ const TESTS: TestDef[] = [
   {
     id: "8",
     label: "Next.js server log",
-    detail: "Structured server log on the active span.",
+    detail: "Explicit Sentry.logger on the server (log_channel=sentry.logger).",
     kind: "http",
     path: "/api/server/log",
   },
   {
     id: "9",
     label: "Python Direct success",
-    detail: "Browser → Next.js → Python Direct. Expect one distributed trace.",
+    detail: "Browser → Next.js → Python Direct. Inspect parent_span_id, not only trace_id.",
     kind: "http",
     path: "/api/proxy/python-direct?mode=success",
   },
   {
     id: "10",
     label: "Python Direct error",
-    detail: "Same path, Python raises. Issue in python-direct, same trace id.",
+    detail: "Same path, Python raises. Issue in python-direct.",
     kind: "http",
     path: "/api/proxy/python-direct?mode=error",
   },
   {
     id: "11",
     label: "Spring → Python Downstream success",
-    detail: "Browser → Next.js → Spring → Python Downstream.",
+    detail: "Browser → Next.js → Spring → Python Downstream. Inspect both hops' parent_span_id.",
     kind: "http",
     path: "/api/proxy/spring?mode=downstream-success",
   },
@@ -133,6 +130,27 @@ const TESTS: TestDef[] = [
     path: "/api/proxy/python-direct?mode=timeout",
   },
   {
+    id: "L1",
+    label: "Python Direct logs",
+    detail: "stdlib logging + sentry_sdk.logger on Python Direct, via Next.js proxy.",
+    kind: "http",
+    path: "/api/proxy/python-direct?mode=log",
+  },
+  {
+    id: "L2",
+    label: "Spring logs",
+    detail: "SLF4J/Logback AND Sentry.logger(). Do not treat one as proof of the other.",
+    kind: "http",
+    path: "/api/proxy/spring?mode=log",
+  },
+  {
+    id: "L3",
+    label: "Python Downstream logs",
+    detail: "Spring RestClient → Python Downstream /api/log (real downstream log correlation).",
+    kind: "http",
+    path: "/api/proxy/spring?mode=downstream-log",
+  },
+  {
     id: "G1",
     label: "Grouping: same error ×3",
     detail: "Fire the identical server exception three times. Expect one Issue, multiple events.",
@@ -149,16 +167,30 @@ const TESTS: TestDef[] = [
   {
     id: "M1",
     label: "Custom metrics (all services)",
-    detail: "Emit poc.request.* metrics from Next.js, Spring, and Python Direct.",
+    detail: "Emit poc.request.* from Next.js, Spring, and Python. queue.depth is synthetic.",
     kind: "http",
     path: "/api/proxy/python-direct?mode=metric",
   },
   {
     id: "U1",
     label: "Uptime endpoint (ok)",
-    detail: "Spring /api/uptime-test calls Python Downstream and returns 200.",
+    detail: "Spring /api/uptime-test → Python Downstream → 200, with structured business log.",
     kind: "http",
     path: "/api/proxy/spring?mode=uptime",
+  },
+  {
+    id: "U2",
+    label: "Uptime endpoint (error)",
+    detail: "Calls Python Downstream, then Spring throws. Sentry Issue + trace.",
+    kind: "http",
+    path: "/api/proxy/spring?mode=uptime-error",
+  },
+  {
+    id: "U3",
+    label: "Uptime endpoint (slow)",
+    detail: "Obvious delay after downstream call. Does NOT by itself prove an Uptime monitor failure.",
+    kind: "http",
+    path: "/api/proxy/spring?mode=uptime-slow",
   },
 ];
 
@@ -169,8 +201,13 @@ function extractTraceIds(body: unknown): string[] {
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
       if (
         typeof nested === "string" &&
-        (key.includes("trace") || key === "traceId" || key === "trace_id") &&
-        nested.length >= 16
+        (key.includes("trace") ||
+          key === "traceId" ||
+          key === "trace_id" ||
+          key === "span_id" ||
+          key === "parent_span_id" ||
+          key === "spanId") &&
+        nested.length >= 8
       ) {
         found.add(`${key}: ${nested}`);
       } else {
@@ -181,6 +218,9 @@ function extractTraceIds(body: unknown): string[] {
   visit(body);
   return [...found];
 }
+
+const RELEASE = process.env.NEXT_PUBLIC_SENTRY_RELEASE ?? "(unset — git SHA at runtime)";
+const ENVIRONMENT = process.env.NEXT_PUBLIC_SENTRY_ENVIRONMENT ?? "poc";
 
 export function Dashboard() {
   const [current, setCurrent] = useState<RunState | null>(null);
@@ -193,25 +233,32 @@ export function Dashboard() {
       { title: "Browser / frontend", ids: ["1", "2", "3", "4", "5"] },
       { title: "Next.js server", ids: ["6", "7", "8"] },
       { title: "Distributed tracing", ids: ["9", "10", "11", "12", "13", "14", "15"] },
-      { title: "Grouping, metrics, uptime", ids: ["G1", "G2", "M1", "U1"] },
+      { title: "Logs", ids: ["L1", "L2", "L3"] },
+      { title: "Grouping, metrics, uptime", ids: ["G1", "G2", "M1", "U1", "U2", "U3"] },
     ],
     [],
   );
 
-  async function run(test: TestDef) {
+  function handleClick(test: TestDef) {
     Sentry.getCurrentScope().setTag("test_case", test.id);
     Sentry.setAttribute("test_case", test.id);
 
+    if (test.clientAction === "throw") {
+      setCurrent({
+        testId: test.id,
+        label: test.label,
+        status: "error",
+        error:
+          "Synchronous uncaught exception thrown in the click handler. This is not a Promise rejection.",
+      });
+      throw new Error("Synchronous uncaught browser exception for Sentry PoC");
+    }
+
+    void run(test);
+  }
+
+  async function run(test: TestDef) {
     if (test.kind === "client") {
-      if (test.clientAction === "throw") {
-        setCurrent({
-          testId: test.id,
-          label: test.label,
-          status: "error",
-          error: "Uncaught exception thrown in the browser. Inspect sentry-poc-next Issues.",
-        });
-        throw new Error("Uncaught browser JavaScript exception for Sentry PoC");
-      }
       if (test.clientAction === "reject") {
         setCurrent({
           testId: test.id,
@@ -239,9 +286,10 @@ export function Dashboard() {
       if (test.clientAction === "log") {
         Sentry.logger.warn("Browser structured warning log for Sentry PoC", {
           service: "sentry-poc-next",
-          environment: "poc",
+          environment: ENVIRONMENT,
           test_case: "browser-log",
           request_kind: "log",
+          log_channel: "sentry.logger",
         });
         Sentry.metrics.count("poc.request.count", 1, {
           attributes: {
@@ -254,7 +302,7 @@ export function Dashboard() {
           testId: test.id,
           label: test.label,
           status: "ok",
-          body: "Sentry.logger.warn sent from the browser. Check Logs in sentry-poc-next.",
+          body: "Sentry.logger.warn sent from the browser (explicit Sentry logger). Check Logs in sentry-poc-next.",
         });
         return;
       }
@@ -317,11 +365,12 @@ export function Dashboard() {
           Trigger each case from the browser. The two paths that must appear as coherent
           distributed traces are{" "}
           <code>Browser → Next.js → Python Direct</code> and{" "}
-          <code>Browser → Next.js → Spring Boot → Python Downstream</code>.
+          <code>Browser → Next.js → Spring Boot → Python Downstream</code>. Same{" "}
+          <code>trace_id</code> is not enough — inspect <code>parent_span_id</code>.
         </p>
         <ul className="meta">
-          <li>environment = poc</li>
-          <li>release = sentry-poc@1.0.0</li>
+          <li>environment = {ENVIRONMENT}</li>
+          <li>release = {RELEASE}</li>
           <li>Replay off · Profiling off</li>
         </ul>
       </header>
@@ -345,7 +394,7 @@ export function Dashboard() {
             {current.error ? <p className="error-text">{current.error}</p> : null}
             {traceIds.length > 0 ? (
               <div>
-                <p className="muted">Trace identifiers found in the response</p>
+                <p className="muted">Trace / span identifiers found in the response</p>
                 <ul className="trace-list">
                   {traceIds.map((item) => (
                     <li key={item}>
@@ -394,7 +443,7 @@ export function Dashboard() {
                   <p className="card-id">{test.id}</p>
                   <h3>{test.label}</h3>
                   <p>{test.detail}</p>
-                  <button type="button" onClick={() => void run(test)} disabled={current?.status === "running"}>
+                  <button type="button" onClick={() => handleClick(test)} disabled={current?.status === "running"}>
                     Run test
                   </button>
                 </article>

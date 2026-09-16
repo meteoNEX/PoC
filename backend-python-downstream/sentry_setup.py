@@ -15,17 +15,26 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 
 SERVICE = "sentry-poc-python-downstream"
 ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "poc")
-RELEASE = os.getenv("SENTRY_RELEASE", "sentry-poc@1.0.0")
+RELEASE = os.getenv("SENTRY_RELEASE") or None
 
 
-def _traces_sampler(sampling_context: dict) -> float:
-    path = ""
+def _is_health(sampling_context: dict) -> bool:
     asgi_scope = sampling_context.get("asgi_scope") or {}
-    path = asgi_scope.get("path") or ""
+    path = str(asgi_scope.get("path") or "")
+    wsgi = sampling_context.get("wsgi_environ") or {}
+    wsgi_path = str(wsgi.get("PATH_INFO") or "")
     transaction = sampling_context.get("transaction_context") or {}
     name = str(transaction.get("name") or "")
-    if path == "/health" or name.endswith("/health"):
+    return path == "/health" or wsgi_path == "/health" or name.endswith("/health")
+
+
+def traces_sampler(sampling_context: dict) -> float:
+    """Drop health always; otherwise inherit parent_sampled; else local rate."""
+    if _is_health(sampling_context):
         return 0.0
+    parent_sampled = sampling_context.get("parent_sampled")
+    if parent_sampled is not None:
+        return 1.0 if parent_sampled else 0.0
     return float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0"))
 
 
@@ -37,7 +46,7 @@ def init_sentry() -> None:
         release=RELEASE,
         server_name=SERVICE,
         send_default_pii=False,
-        traces_sampler=_traces_sampler,
+        traces_sampler=traces_sampler,
         integrations=[
             LoggingIntegration(level=logging.INFO, event_level=None),
             StarletteIntegration(transaction_style="url"),
