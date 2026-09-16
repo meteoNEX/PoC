@@ -118,7 +118,7 @@ Create the token in Sentry:
 
 The Next.js production build still succeeds without this token. Source maps simply are not uploaded.
 
-If `SENTRY_AUTH_TOKEN` **is** set but invalid, `next build` **fails** (401). That is intentional so a bad token cannot be mistaken for a successful upload.
+If `SENTRY_AUTH_TOKEN` **is** set but invalid, `next build` **fails** (HTTP 401). That is intentional so a bad token cannot be mistaken for a successful upload.
 
 ### Sampling (read this)
 
