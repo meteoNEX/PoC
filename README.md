@@ -278,18 +278,33 @@ Use **Issues**, **Explore → Traces**, **Logs**, and **Metrics**. Filter `envir
 - **Server errors (6–7):** Node runtime, route `/api/server/*`.
 - **Server log (8):** Explicit `Sentry.logger` with attributes `service`, `test_case`, `request_kind`, `log_channel`.
 - **Trace 9:** **Two** projects (`sentry-poc-next-2` + `sentry-poc-python-direct`). Expected abstract tree:
-  - Browser transaction / browser span
-  - → Next.js server span
+  - Browser pageload (`op=pageload`, name `/`)
+  - → Browser `http.client` `GET /api/proxy/python-direct` (`origin=auto.http.browser`)
+  - → Next.js `http.server` `GET /api/proxy/python-direct` (`parent_span_id` = browser http.client span id)
   - → Next.js HTTP client span (`http.client`)
-  - → Python Direct server span (`parent_span_id` = HTTP client span id)
+  - → Python Direct server span (`parent_span_id` = Next.js HTTP client span id)
 - **Trace 11:** **Three** projects. Expected abstract tree:
-  - Browser transaction / browser span
-  - → Next.js server span
+  - Browser pageload (`op=pageload`, name `/`)
+  - → Browser `http.client` `GET /api/proxy/spring`
+  - → Next.js `http.server` `GET /api/proxy/spring` (`parent_span_id` = browser http.client span id)
   - → Next.js HTTP client span
   - → Spring server span
   - → Spring HTTP client span
   - → Python Downstream server span
 - If the current Browser SDK models pageload vs fetch slightly differently, record the actual tree, but the HTTP client span **must** be the parent of the downstream server span (or the SDK’s documented equivalent).
+
+### Browser → Next.js (do not stop at Trace Samples)
+
+Same-origin dashboard `fetch("/api/proxy/...")` uses native `window.fetch` (only `{ cache: "no-store" }`). `@sentry/nextjs` `browserTracingIntegration()` plus `tracePropagationTargets` (including `/^\//`) attach `sentry-trace`, `baggage`, and `traceparent` to that request. Next.js Node HTTP instrumentation calls `continueTrace` from those headers. **No manual tracing headers.**
+
+Local proof is on the dashboard JSON as `browser_to_next.browser_to_next_hop`:
+
+- `incoming_browser_headers['sentry-trace']` span id **must** equal `next_root_span.parent_span_id`
+- Compare against the **root** `http.server` span, not `next_trace.activeSpan`. The active span inside the route is often `executing api route`, whose parent is the Next.js server span.
+
+In Sentry **Explore → Traces**, a filter for `/api/proxy/spring` lists the **Next.js server transaction** because that is the span whose name matches. That sample can look like it “starts at `http.server GET /api/proxy/spring`”. Open the **full Trace** by `trace_id` (copy it from the dashboard). The waterfall root is the browser pageload; the server span’s parent is the browser `http.client` span.
+
+The Sentry UI tree is still **Requires Sentry SaaS verification**.
 - **Logs L1–L3:** See section 10. Framework logging ≠ explicit Sentry logger.
 - **Metrics:** `poc.request.duration` is elapsed wall time. `poc.queue.depth` is a **synthetic gauge example** — there is no real queue.
 - **Uptime:** See section 15. Do not claim a 4s delay always fails a Sentry Uptime monitor.
@@ -304,6 +319,7 @@ Use **Issues**, **Explore → Traces**, **Logs**, and **Metrics**. Filter `envir
    - Test 11: `sentry-poc-next-2` + `sentry-poc-spring` + `sentry-poc-python-downstream`
 5. Local evidence in the JSON:
    - `headers_injected_by_next_before_fetch` must be `false`
+   - `browser_to_next.browser_to_next_hop.parent_child_matches_incoming_span` must be `true` for a real browser click (curl has no browser SDK headers)
    - `incoming_trace_headers['sentry-trace']` span id must equal downstream `active_span.parent_span_id`
    - that span id must **differ** from the Next.js route `next_trace.activeSpan.spanId` (the HTTP client span is not the route span)
 6. `scripts/assert-trace-hierarchy.py` (invoked by `smoke-test.sh`) checks those local relationships. The Sentry UI tree is still **Requires Sentry SaaS verification**.
@@ -325,7 +341,7 @@ What this process **actually sent** is recorded in:
 - `downstream_body.incoming_trace_headers` (canonical)
 - `observed_undici_headers` (best-effort undici `sendHeaders` diagnostic)
 
-`tracePropagationTargets` includes `localhost`, `127.0.0.1`, `python-direct`, `spring`, `python-downstream`, and `/^\//` so native and Docker DNS hosts both propagate.
+`tracePropagationTargets` includes `localhost`, `127.0.0.1`, `python-direct`, `spring`, `python-downstream`, and `/^\//`. The browser SDK matches those entries against the full URL **and** (for same-origin requests) the pathname, so relative `/api/proxy/*` fetches propagate. Host strings also cover Docker DNS names for server-side outbound hops.
 
 Spring → Python Downstream uses official Sentry RestClient instrumentation (`SentrySpanRestClientCustomizer`) with `sentry.propagate-traceparent=true`. No manual header injection.
 

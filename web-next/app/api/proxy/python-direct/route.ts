@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/nextjs";
 import {
+  browserIncomingTraceDebug,
   currentTraceDebug,
   hierarchyFromProxyBody,
   jsonHeadersFromResponse,
@@ -52,6 +53,7 @@ export async function GET(request: Request) {
         observed_undici_headers: observedUndiciHeaders,
         observation_note: observationNote,
         span_hierarchy_local_evidence: hierarchyFromProxyBody(body),
+        browser_to_next: browserIncomingTraceDebug(request),
         downstream_status: response.status,
         downstream_headers: jsonHeadersFromResponse(response),
         downstream_body: body,
@@ -71,6 +73,7 @@ export async function GET(request: Request) {
         timeout: timedOut,
         headers_injected_by_next_before_fetch: false,
         error: error instanceof Error ? error.message : String(error),
+        browser_to_next: browserIncomingTraceDebug(request),
         next_trace: currentTraceDebug(),
       },
       { status: timedOut ? 504 : 500 },

@@ -65,11 +65,32 @@ test("hierarchyFromProxyBody includes Spring → Python hop", () => {
   assert.equal(hops[1].parent_child_matches_incoming_span, true);
 });
 
-test("tracePropagationTargets cover native localhost and Docker DNS names", () => {
+test("tracePropagationTargets match same-origin relative /api proxy paths", () => {
   const asStrings = TRACE_PROPAGATION_TARGETS.map(String);
   for (const needed of ["localhost", "127.0.0.1", "python-direct", "spring", "python-downstream"]) {
     assert.equal(asStrings.includes(needed), true, `missing target ${needed}`);
   }
+  assert.equal(
+    TRACE_PROPAGATION_TARGETS.some((item) => item instanceof RegExp && item.source === "^\\/"),
+    true,
+    "missing /^\\// for same-origin relative URLs",
+  );
+
+  // Mirrors @sentry/browser shouldAttachHeaders: full URL substring/regex OR
+  // (same-origin AND pathname substring/regex).
+  function browserWouldAttach(fullUrl: string): boolean {
+    const resolved = new URL(fullUrl);
+    const pathname = resolved.pathname;
+    return TRACE_PROPAGATION_TARGETS.some((pattern) => {
+      if (typeof pattern === "string") {
+        return fullUrl.includes(pattern) || pathname.includes(pattern);
+      }
+      return pattern.test(fullUrl) || pattern.test(pathname);
+    });
+  }
+  assert.equal(browserWouldAttach("http://127.0.0.1:3000/api/proxy/spring?mode=downstream-success"), true);
+  assert.equal(browserWouldAttach("http://localhost:3000/api/proxy/python-direct?mode=success"), true);
+  assert.equal(browserWouldAttach("http://example.invalid/api/proxy/spring"), true);
 });
 
 test("outbound-fetch source does not pre-inject tracing headers", () => {
